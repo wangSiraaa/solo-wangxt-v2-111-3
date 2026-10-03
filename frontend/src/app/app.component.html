@@ -15,11 +15,13 @@
 
   <div class="tabs">
     <button [class.active]="tab === 'materials'" (click)="tab = 'materials'">① 原料与化验</button>
-    <button [class.active]="tab === 'blend'" (click)="tab = 'blend'">② 配比试算与方案对比</button>
+    <button [class.active]="tab === 'specs'" (click)="tab = 'specs'">② 约束规范</button>
+    <button [class.active]="tab === 'blend'" (click)="tab = 'blend'">③ 配比试算与方案对比</button>
     <button [class.active]="tab === 'history'" (click)="tab = 'history'">④ 历史追溯</button>
   </div>
 
   <app-materials *ngIf="tab === 'materials'"></app-materials>
+  <app-specs *ngIf="tab === 'specs'"></app-specs>
   <app-blend *ngIf="tab === 'blend'"></app-blend>
   <app-history *ngIf="tab === 'history'"></app-history>
 </div>

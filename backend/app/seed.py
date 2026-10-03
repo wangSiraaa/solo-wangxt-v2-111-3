@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from .database import Base, SessionLocal, engine
-from .models import AssayVersion, Material
+from .models import AssayVersion, Material, SpecFamily, SpecRevision
 
 ALL_MAJOR = ["CaO", "SiO2", "Al2O3", "Fe2O3",
              "MgO", "SO3", "K2O", "Na2O", "Cl", "LOI"]
@@ -119,22 +119,65 @@ MATERIALS = [
 ]
 
 
+BASE_TARGETS = {"SM": {"min": 2.4, "max": 2.8},
+                "IM": {"min": 1.4, "max": 1.8},
+                "KH": {"min": 0.88, "max": 0.94}}
+
+# 演示用版本化约束规范（虚构工艺边界）
+SPECS = [
+    dict(
+        spec_code="STD-GENERAL", name="通用基准规范（虚构）",
+        note="研发日常对比的默认窗口：SM/IM/KH 双边窗口 + Cl/碱当量限值。",
+        revision_no="R1", status="published",
+        snapshot={"targets": BASE_TARGETS,
+                  "hazard_limits_pct": {"Cl": 0.05, "alkali_eq": 1.5}},
+    ),
+    dict(
+        spec_code="LOW-ALKALI", name="低碱规范（草稿·待发布）",
+        note="收紧碱当量到 0.60% 的低碱水泥研发边界，当前为草稿，发布后才生效。",
+        revision_no="R1", status="draft",
+        snapshot={"targets": {"SM": {"min": 2.4, "max": 2.7},
+                              "IM": {"min": 1.4, "max": 1.7},
+                              "KH": {"min": 0.89, "max": 0.93}},
+                  "hazard_limits_pct": {"Cl": 0.03, "alkali_eq": 0.6}},
+    ),
+]
+
+
 def seed():
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        if db.scalars(select(Material)).first():
-            print("seed: 数据已存在，跳过。")
-            return
-        for spec in MATERIALS:
-            versions = spec.pop("versions")
-            mat = Material(**spec)
-            db.add(mat)
-            db.flush()
-            for v in versions:
-                db.add(AssayVersion(material_id=mat.id, **v))
-        db.commit()
-        print(f"seed: 已写入 {len(MATERIALS)} 个虚构原料及其化验版本。")
+        if not db.scalars(select(Material)).first():
+            for spec in MATERIALS:
+                versions = spec.pop("versions")
+                mat = Material(**spec)
+                db.add(mat)
+                db.flush()
+                for v in versions:
+                    db.add(AssayVersion(material_id=mat.id, **v))
+            db.commit()
+            print(f"seed: 已写入 {len(MATERIALS)} 个虚构原料及其化验版本。")
+        else:
+            print("seed: 原料数据已存在，跳过。")
+
+        if not db.scalars(select(SpecFamily)).first():
+            for sp in SPECS:
+                rev_status = sp.pop("status")
+                rev_no = sp.pop("revision_no")
+                snap = sp.pop("snapshot")
+                fam = SpecFamily(**sp, status="active", lock_version=0)
+                db.add(fam)
+                db.flush()
+                db.add(SpecRevision(
+                    family_id=fam.id, revision_no=rev_no,
+                    status=rev_status, spec_snapshot=snap, lock_version=0,
+                    published_at=datetime.utcnow() if rev_status == "published" else None,
+                ))
+            db.commit()
+            print(f"seed: 已写入 {len(SPECS)} 个版本化约束规范（1 发布 + 1 草稿）。")
+        else:
+            print("seed: 规范数据已存在，跳过。")
     finally:
         db.close()
 

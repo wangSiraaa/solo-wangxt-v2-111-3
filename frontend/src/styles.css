@@ -137,3 +137,5 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 details.trace summary { cursor: pointer; color: var(--brand); font-weight: 600; }
 .kpi { font-size: 22px; font-weight: 700; color: var(--brand); }
 .kpi small { font-size: 12px; color: var(--muted); font-weight: 400; }
+
+button.okbtn { background: var(--ok); }

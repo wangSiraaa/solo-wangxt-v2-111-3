@@ -12,18 +12,46 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from . import chemistry, crud, optimizer
+from . import chemistry, crud, optimizer, specstore
 from .database import Base, engine, get_db
 from .schemas import (
     BlendRequest,
     BlendResponse,
+    CopyRequest,
+    DeprecateRequest,
+    DraftUpdate,
     EvaluateRequest,
     MaterialOut,
+    PublishRequest,
+    SpecBinding,
+    SpecFamilyCreate,
     SolutionItem,
     SolutionOut,
+    Targets,
+    Interval,
 )
 
-Base.metadata.create_all(bind=engine)
+def _ensure_schema():
+    """幂等建表 + 旧库补列（开发/演示环境无迁移框架时使用）。"""
+    from sqlalchemy import inspect, text
+
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    if "blend_run" in inspector.get_table_names():
+        have = {c["name"] for c in inspector.get_columns("blend_run")}
+        want = {
+            "spec_revision_id": "INTEGER REFERENCES spec_revision(id) ON DELETE RESTRICT",
+            "spec_code": "VARCHAR(32)",
+            "spec_revision_no": "VARCHAR(32)",
+            "spec_snapshot": "JSON",
+        }
+        with engine.begin() as conn:
+            for name, ddl in want.items():
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE blend_run ADD COLUMN {name} {ddl}"))
+
+
+_ensure_schema()
 
 app = FastAPI(
     title="离线原料配比试算（虚构工艺边界 · 研发用）",
@@ -41,6 +69,20 @@ def blend_error_handler(request, exc: chemistry.BlendError):
 
     return JSONResponse(
         status_code=422,
+        content={
+            "error_code": exc.code,
+            "message": exc.message,
+            "details": exc.details,
+        },
+    )
+
+
+@app.exception_handler(specstore.SpecError)
+def spec_error_handler(request, exc: specstore.SpecError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status,
         content={
             "error_code": exc.code,
             "message": exc.message,
@@ -78,19 +120,67 @@ def _serialize_solution(sol: dict) -> SolutionOut:
 
 @app.post("/api/blend", response_model=BlendResponse)
 def blend(req: BlendRequest, db: Session = Depends(get_db)):
-    pairs = crud.resolve_candidates(db, req.candidates)
-    rows = optimizer.prepare_rows(pairs)
-    if not rows:
-        raise HTTPException(400, "候选原料为空。")
-    solutions = optimizer.solve(rows, req)
-    run_id, run_code = None, ""
-    if req.save:
-        run = crud.save_run(db, req, solutions)
-        run_id, run_code = run.id, run.run_code
+    # 版本化约束规范：引用修订版时，求解参数一律取自服务端冻结快照，
+    # 忽略请求体里夹带的临时 targets/hazard_limits，避免临时参数冒充规范。
+    # 对规范族/修订加行锁并持有到结果入库：停用/发布/复制与试算引用串行化，
+    # 保证“停用后不可能再混入引用该规范的新批次”。
+    spec_rev = None
+    try:
+        if req.spec_revision_id is not None:
+            spec_rev = specstore.resolve_for_blend(db, req.spec_revision_id, lock=True)
+            snap = spec_rev.spec_snapshot
+            solve_req = BlendRequest(
+                scenario_name=req.scenario_name,
+                batch_t_dry=req.batch_t_dry,
+                candidates=req.candidates,
+                targets=Targets(**{
+                    k: Interval(**v) for k, v in snap["targets"].items()
+                }),
+                hazard_limits_pct=dict(snap["hazard_limits_pct"]),
+                modes=req.modes,
+                cheap_material_id=req.cheap_material_id,
+                save=req.save,
+            )
+        else:
+            if req.targets is None:
+                raise HTTPException(
+                    400, "必须指定 spec_revision_id 或给出 targets（SM/IM/KH 窗口）。"
+                )
+            solve_req = req.model_copy(
+                update={"hazard_limits_pct": req.hazard_limits_pct or {}}
+            )
+
+        pairs = crud.resolve_candidates(db, solve_req.candidates)
+        rows = optimizer.prepare_rows(pairs)
+        if not rows:
+            raise HTTPException(400, "候选原料为空。")
+        solutions = optimizer.solve(rows, solve_req)
+        run_id, run_code = None, ""
+        if solve_req.save:
+            run = crud.save_run(db, solve_req, solutions, spec_rev=spec_rev)  # 提交并释放锁
+            run_id, run_code = run.id, run.run_code
+        elif spec_rev is not None:
+            db.rollback()  # 不入库：显式结束事务释放规范锁
+    except Exception:
+        if spec_rev is not None:
+            db.rollback()
+        raise
+
+    binding = None
+    if spec_rev is not None:
+        binding = SpecBinding(
+            revision_id=spec_rev.id,
+            spec_code=spec_rev.family.spec_code,
+            spec_name=spec_rev.family.name,
+            revision_no=spec_rev.revision_no,
+            status=spec_rev.status,
+            snapshot=spec_rev.spec_snapshot,
+        )
     return BlendResponse(
         run_id=run_id,
         run_code=run_code,
         status="feasible" if any(s["success"] for s in solutions) else "infeasible",
+        spec=binding,
         solutions=[_serialize_solution(s) for s in solutions],
     )
 
@@ -154,6 +244,85 @@ def evaluate(req: EvaluateRequest, db: Session = Depends(get_db)):
         "contributions": synth["contributions"],
         "items": items,
     }
+
+
+@app.get("/api/specs")
+def specs(status: str | None = None, db: Session = Depends(get_db)):
+    """列出约束规范族（含全部修订版）。"""
+    return [specstore.family_out(f)
+            for f in specstore.list_families(db, status=status)]
+
+
+@app.post("/api/specs", status_code=201)
+def create_spec(body: SpecFamilyCreate, db: Session = Depends(get_db)):
+    """创建规范族并自带 R1 草稿（SM/IM/KH 区间 + 有害组分限值）。"""
+    return specstore.create_family(
+        db, spec_code=body.spec_code, name=body.name, note=body.note,
+        snapshot=body.snapshot.model_dump(),
+    )
+
+
+@app.get("/api/specs/{family_id}")
+def spec_detail(family_id: int, db: Session = Depends(get_db)):
+    return specstore.family_out(specstore.get_family(db, family_id))
+
+
+@app.post("/api/specs/{family_id}/deprecate")
+def deprecate_spec(family_id: int, body: DeprecateRequest,
+                   db: Session = Depends(get_db)):
+    return specstore.deprecate(db, family_id, expected_lock=body.lock_version)
+
+
+@app.patch("/api/spec-revisions/{revision_id}")
+def patch_draft(revision_id: int, body: DraftUpdate,
+                db: Session = Depends(get_db)):
+    """仅 draft 可改；已发布修订直接拒绝（SPEC_PUBLISHED_IMMUTABLE）。"""
+    return specstore.update_draft(
+        db, revision_id,
+        snapshot=body.snapshot.model_dump(),
+        expected_lock=body.lock_version,
+        change_note=body.change_note,
+    )
+
+
+@app.delete("/api/spec-revisions/{revision_id}", status_code=204)
+def delete_draft(revision_id: int, lock_version: int | None = None,
+                 db: Session = Depends(get_db)):
+    specstore.delete_draft(db, revision_id, expected_lock=lock_version)
+
+
+@app.post("/api/spec-revisions/{revision_id}/publish")
+def publish_revision(revision_id: int, body: PublishRequest,
+                     db: Session = Depends(get_db)):
+    """草稿发布为不可编辑修订；同草稿并发发布只有一方成功。"""
+    return specstore.publish(
+        db, revision_id,
+        expected_lock=body.lock_version,
+        expected_family_lock=body.family_lock_version,
+    )
+
+
+@app.post("/api/spec-revisions/{revision_id}/copy", status_code=201)
+def copy_revision(revision_id: int, body: CopyRequest,
+                  db: Session = Depends(get_db)):
+    """复制已发布/历史修订为新草稿，供调整限值后再发布。"""
+    return specstore.copy_to_draft(
+        db, revision_id,
+        expected_family_lock=body.family_lock_version,
+        change_note=body.change_note,
+    )
+
+
+@app.get("/api/spec-revisions/{revision_id}/runs")
+def revision_runs(revision_id: int, db: Session = Depends(get_db)):
+    """列出引用了该修订版的全部试算运行（该修订的影响范围）。"""
+    return specstore.affected_runs(db, revision_id)
+
+
+@app.get("/api/spec-revisions/{revision_id}/diff/{other_id}")
+def revision_diff(revision_id: int, other_id: int, db: Session = Depends(get_db)):
+    """两个修订版之间的参数差异（逐项 from/to）。"""
+    return specstore.diff_revisions(db, revision_id, other_id)
 
 
 @app.get("/api/runs")

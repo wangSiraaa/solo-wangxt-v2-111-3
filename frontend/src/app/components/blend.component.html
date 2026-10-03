@@ -1,10 +1,52 @@
 <!-- 演示预设 -->
 <div class="panel">
-  <h2>② 离线配比试算（FastAPI + SciPy HiGHS LP）</h2>
+  <h2>③ 离线配比试算（FastAPI + SciPy HiGHS LP）</h2>
   <p class="muted small">
     先按干基质量守恒合成生料，再计算硅率 SM / 铝率 IM / 石灰饱和 KH；
     约束含最低掺量、湿基可用量、有害组分干基上限。求解失败时用最小违约模型列出冲突项。
   </p>
+
+  <!-- 版本化规范选择 -->
+  <div class="callout info small">
+    <div class="row">
+      <label class="small">
+        <input type="radio" name="specmode" [checked]="useSpec"
+               (change)="useSpec = true; onSpecChange()" value="spec" />
+        引用<strong>已发布约束规范</strong>（参数冻结、结果可复现）：
+      </label>
+      <select [ngModel]="selectedRevisionId" (ngModelChange)="selectedRevisionId = $event; onSpecChange()"
+              [disabled]="!useSpec">
+        <option [ngValue]="null">— 请选择有效修订 —</option>
+        <option *ngFor="let x of usableRevisions()" [ngValue]="x.rev.id">
+          {{ x.family.spec_code }} · {{ x.rev.revision_no }}（{{ x.family.name }}）
+        </option>
+      </select>
+      <button class="ghost" (click)="goSpecs()">管理规范</button>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <label class="small">
+        <input type="radio" name="specmode" [checked]="!useSpec"
+               (change)="useSpec = false; syncActiveRevision()" value="ad hoc" />
+        临时参数试算（不绑定规范，历史会标注“未关联规范”，不可当作可复现规范）
+      </label>
+    </div>
+    <div class="small" *ngIf="useSpec && activeSpecRevision as r" style="margin-top:6px">
+      <span class="badge ok">已绑定 {{ r.spec_code }} {{ r.revision_no }} · 冻结快照</span>
+      SM[{{ r.spec_snapshot.targets.SM.min }},{{ r.spec_snapshot.targets.SM.max }}]
+      IM[{{ r.spec_snapshot.targets.IM.min }},{{ r.spec_snapshot.targets.IM.max }}]
+      KH[{{ r.spec_snapshot.targets.KH.min }},{{ r.spec_snapshot.targets.KH.max }}]
+      ｜
+      <span *ngFor="let hk of Object.keys(r.spec_snapshot.hazard_limits_pct)">
+        {{ hk }}≤{{ r.spec_snapshot.hazard_limits_pct[hk] }}%&nbsp;
+      </span>
+    </div>
+    <div class="small" style="margin-top:6px"
+         *ngIf="!usableRevisions().length">
+      <span class="badge warn">暂无已发布规范</span>
+      请到「② 约束规范」创建并发布后再引用。
+    </div>
+  </div>
+
   <div class="row">
     <strong class="small">快速场景：</strong>
     <button class="ghost" *ngFor="let p of presets" (click)="applyPreset(p)">{{ p.label }}</button>
@@ -50,26 +92,42 @@
 
   <!-- 指标/约束/模式 -->
   <div class="panel">
-    <h3>率值目标（虚构工艺窗口）· 有害上限 · 模式</h3>
+    <h3>率值窗口 · 有害上限 · 模式</h3>
+    <p class="small muted" *ngIf="useSpec">
+      以下窗口/限值取自所选规范修订的<strong>冻结快照</strong>，此处只读；
+      要调整请到「② 约束规范」复制出新版本。
+    </p>
     <table>
       <thead><tr><th>指标</th><th class="num">下限</th><th class="num">上限</th><th>公式</th></tr></thead>
       <tbody>
         <tr>
           <td>硅率 SM</td>
-          <td class="num"><input type="number" step="0.05" [(ngModel)]="targets.SM.min" /></td>
-          <td class="num"><input type="number" step="0.05" [(ngModel)]="targets.SM.max" /></td>
+          <td class="num"><input type="number" step="0.05"
+            [ngModel]="effectiveTargets().SM.min" [disabled]="useSpec"
+            (ngModelChange)="targets.SM.min = $event" name="tSMin"/></td>
+          <td class="num"><input type="number" step="0.05"
+            [ngModel]="effectiveTargets().SM.max" [disabled]="useSpec"
+            (ngModelChange)="targets.SM.max = $event" name="tSMax"/></td>
           <td class="small muted">SiO₂/(Al₂O₃+Fe₂O₃)</td>
         </tr>
         <tr>
           <td>铝率 IM</td>
-          <td class="num"><input type="number" step="0.05" [(ngModel)]="targets.IM.min" /></td>
-          <td class="num"><input type="number" step="0.05" [(ngModel)]="targets.IM.max" /></td>
+          <td class="num"><input type="number" step="0.05"
+            [ngModel]="effectiveTargets().IM.min" [disabled]="useSpec"
+            (ngModelChange)="targets.IM.min = $event" name="tIMin"/></td>
+          <td class="num"><input type="number" step="0.05"
+            [ngModel]="effectiveTargets().IM.max" [disabled]="useSpec"
+            (ngModelChange)="targets.IM.max = $event" name="tIMax"/></td>
           <td class="small muted">Al₂O₃/Fe₂O₃</td>
         </tr>
         <tr>
           <td>石灰饱和 KH</td>
-          <td class="num"><input type="number" step="0.01" [(ngModel)]="targets.KH.min" /></td>
-          <td class="num"><input type="number" step="0.01" [(ngModel)]="targets.KH.max" /></td>
+          <td class="num"><input type="number" step="0.01"
+            [ngModel]="effectiveTargets().KH.min" [disabled]="useSpec"
+            (ngModelChange)="targets.KH.min = $event" name="tKMin"/></td>
+          <td class="num"><input type="number" step="0.01"
+            [ngModel]="effectiveTargets().KH.max" [disabled]="useSpec"
+            (ngModelChange)="targets.KH.max = $event" name="tKMax"/></td>
           <td class="small muted">(CaO−1.65A−0.35F)/(2.8SiO₂)</td>
         </tr>
       </tbody>
@@ -77,12 +135,25 @@
 
     <div class="row" style="margin-top:10px">
       <label class="small">Cl 上限 %（干基）
-        <input type="number" step="0.001" [(ngModel)]="hazardCl" /></label>
+        <input type="number" step="0.001"
+               [ngModel]="effectiveHazards()['Cl']"
+               [disabled]="useSpec"
+               (ngModelChange)="hazardCl = $event" name="hCl"/></label>
       <label class="small">碱当量 Na₂O+0.658K₂O 上限 %
-        <input type="number" step="0.05" [(ngModel)]="hazardAlkali" /></label>
+        <input type="number" step="0.05"
+               [ngModel]="effectiveHazards()['alkali_eq']"
+               [disabled]="useSpec"
+               (ngModelChange)="hazardAlkali = $event" name="hAlk"/></label>
       <label class="small">批量（t 干生料）
         <input type="number" step="100" [(ngModel)]="batch" /></label>
     </div>
+    <p class="small" *ngIf="useSpec">
+      本规范登记的有害限值：
+      <span class="badge dry" *ngFor="let hk of Object.keys(effectiveHazards())">
+        {{ hk }} {{ effectiveHazards()[hk] }}%
+      </span>
+      <span class="muted" *ngIf="!Object.keys(effectiveHazards()).length">无</span>
+    </p>
 
     <h3 style="margin-top:12px">求解模式（多可行解对比）</h3>
     <div class="row">
@@ -133,9 +204,15 @@
     状态：<span [class]="'badge ' + (result.status === 'feasible' ? 'ok' : 'err')">
     {{ result.status === 'feasible' ? '存在可行解' : '全部无解' }}</span>
     （共 {{ result.solutions.length }} 个方案）
+    <span *ngIf="result.spec as s" class="badge ok" style="margin-left:8px">
+      🔒 绑定规范 {{ s.spec_code }} {{ s.revision_no }}（参数快照已冻结）
+    </span>
+    <span *ngIf="!result.spec" class="badge warn" style="margin-left:8px">
+      未关联规范（临时参数，非可复现规范）
+    </span>
   </div>
   <app-solution-card *ngFor="let s of result.solutions; let i = index"
-                     [sol]="s" [targets]="targets" [index]="i"></app-solution-card>
+                     [sol]="s" [targets]="effectiveTargets()" [index]="i"></app-solution-card>
 </ng-container>
 
 <!-- 手工配比错误演示 -->

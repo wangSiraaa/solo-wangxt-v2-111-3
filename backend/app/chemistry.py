@@ -112,8 +112,8 @@ def build_conversion_trace(
     }
 
 
-def require_measured(material_rows: list[dict], required: list[str]) -> None:
-    """参与求解的原料必须实测所需组分；缺测即报错，绝不当零。"""
+def _missing_rows(material_rows: list[dict], required: list[str]) -> list[dict]:
+    """列出缺测项（不抛异常），供调用方一次性汇总。"""
     missing = []
     for row in material_rows:
         measured = set(row.get("measured_oxides") or row["composition"].keys())
@@ -132,8 +132,19 @@ def require_measured(material_rows: list[dict], required: list[str]) -> None:
                         "component": comp,
                     }
                 )
+    return missing
+
+
+def require_measured(material_rows: list[dict], required: list[str]) -> None:
+    """参与求解的原料必须实测所需组分；缺测即报错，绝不当零。"""
+    missing = _missing_rows(material_rows, required)
     if missing:
         raise MissingAssayError(missing)
+
+
+def collect_missing(material_rows: list[dict], required: list[str]) -> list[dict]:
+    """同 require_measured 但返回缺测列表，供多组要求汇总后一次报错。"""
+    return _missing_rows(material_rows, required)
 
 
 @dataclass

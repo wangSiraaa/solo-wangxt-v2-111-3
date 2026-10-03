@@ -8,15 +8,20 @@
   <div class="grid2">
     <div>
       <table>
-        <thead><tr><th>批次号</th><th>场景</th><th>状态</th><th>模式</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>批次号</th><th>场景</th><th>规范绑定</th><th>状态</th><th>时间</th><th></th></tr></thead>
         <tbody>
           <tr *ngFor="let r of runs"
               [style.background]="detail?.id === r.id ? 'var(--brand-soft)' : ''">
             <td class="mono small">{{ r.run_code }}</td>
             <td>{{ r.scenario_name }}</td>
+            <td class="small">
+              <span class="badge ok" *ngIf="r.spec_code">
+                🔒 {{ r.spec_code }} {{ r.spec_revision_no }}
+              </span>
+              <span class="badge warn" *ngIf="!r.spec_code">未关联规范</span>
+            </td>
             <td><span [class]="'badge ' + (r.status === 'feasible' ? 'ok' : 'err')">
               {{ r.status }}</span></td>
-            <td class="small">{{ r.modes.join('/') }}</td>
             <td class="small muted">{{ r.created_at }}</td>
             <td><button class="ghost" (click)="open(r.id)">回看</button></td>
           </tr>
@@ -27,10 +32,33 @@
 
     <div *ngIf="detail">
       <div class="panel" style="margin-bottom:10px">
-        <h3>{{ detail.scenario_name }}
-          <span class="mono small muted">{{ detail.run_code }}</span></h3>
+        <div class="row">
+          <h3>{{ detail.scenario_name }}
+            <span class="mono small muted">{{ detail.run_code }}</span></h3>
+          <span class="spacer"></span>
+          <button class="ghost" *ngIf="detail.spec" (click)="backToFrozenRule()">
+            回到当时冻结规则
+          </button>
+        </div>
         <div class="small muted">
-          批量 {{ detail.batch_t_dry }} t 干生料 · {{ detail.created_at }} ·
+          批量 {{ detail.batch_t_dry }} t 干生料 · {{ detail.created_at }}
+        </div>
+        <div class="small" style="margin-top:6px" *ngIf="detail.spec as sp">
+          <span class="badge ok">🔒 绑定规范 {{ sp.spec_code }} {{ sp.revision_no }}</span>
+          本批次按试算时刻的<strong>冻结参数快照</strong>求解与展示，不随规范后来更新而改变：
+          <div class="mono" style="margin-top:4px">
+            SM[{{ sp.snapshot.targets.SM.min }},{{ sp.snapshot.targets.SM.max }}]
+            IM[{{ sp.snapshot.targets.IM.min }},{{ sp.snapshot.targets.IM.max }}]
+            KH[{{ sp.snapshot.targets.KH.min }},{{ sp.snapshot.targets.KH.max }}]
+            ｜
+            <span *ngFor="let hk of Object.keys(sp.snapshot.hazard_limits_pct || {})">
+              {{ hk }}≤{{ sp.snapshot.hazard_limits_pct[hk] }}%&nbsp;
+            </span>
+          </div>
+        </div>
+        <div class="small" style="margin-top:6px" *ngIf="!detail.spec">
+          <span class="badge warn">未关联规范</span>
+          该批次来自未引入版本化规范前的临时参数试算，仍可直接回看；
           目标 SM[{{ detail.target.SM.min }},{{ detail.target.SM.max }}]
           IM[{{ detail.target.IM.min }},{{ detail.target.IM.max }}]
           KH[{{ detail.target.KH.min }},{{ detail.target.KH.max }}]

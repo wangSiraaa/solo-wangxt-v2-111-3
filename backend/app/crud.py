@@ -44,7 +44,14 @@ def rows_from_candidates(db: Session, candidates) -> list[Row]:
     return prepare_rows(resolve_candidates(db, candidates))
 
 
-def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None = None):
+def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None = None,
+             spec_rev=None):
+    """持久化一次试算。
+
+    spec_rev 为 SpecRevision 时，写入规范编号/修订号/完整参数快照；
+    求解所用 targets/hazard_limits 也必须来自该冻结快照（调用方保证）。
+    spec_rev=None 时保留未关联规范的旧行为，旧批次仍可直接回看。
+    """
     run = models.BlendRun(
         run_code=f"RUN-{uuid.uuid4().hex[:10].upper()}",
         scenario_name=scenario_name or getattr(req, "scenario_name", "试算"),
@@ -56,6 +63,10 @@ def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None 
             "modes": getattr(req, "modes", []),
         },
         status="feasible" if any(s["success"] for s in solutions) else "infeasible",
+        spec_revision_id=spec_rev.id if spec_rev is not None else None,
+        spec_code=spec_rev.family.spec_code if spec_rev is not None else None,
+        spec_revision_no=spec_rev.revision_no if spec_rev is not None else None,
+        spec_snapshot=dict(spec_rev.spec_snapshot) if spec_rev is not None else None,
     )
     db.add(run)
     db.flush()
@@ -109,6 +120,13 @@ def get_run_detail(db: Session, run_id: int):
         "constraint_set": run.constraint_set,
         "status": run.status,
         "created_at": run.created_at.isoformat(timespec="seconds"),
+        "spec": {
+            "revision_id": run.spec_revision_id,
+            "spec_code": run.spec_code,
+            "revision_no": run.spec_revision_no,
+            # 历史回看永远使用试算时刻冻结的快照，不随规范后来更新而改变
+            "snapshot": run.spec_snapshot,
+        } if run.spec_revision_id is not None else None,
         "solutions": [],
     }
     for s in run.solutions:
@@ -155,4 +173,7 @@ def list_runs(db: Session, limit: int = 50):
         "status": r.status,
         "created_at": r.created_at.isoformat(timespec="seconds"),
         "modes": [s.mode for s in r.solutions],
+        "spec_revision_id": r.spec_revision_id,
+        "spec_code": r.spec_code,
+        "spec_revision_no": r.spec_revision_no,
     } for r in runs]
