@@ -358,18 +358,16 @@ MODE_LABELS = {
 
 def solve(rows: list[Row], req) -> list[dict]:
     n = len(rows)
-    # 求解前缺测检查（四大率值组分 + 被约束有害组分必须实测）
+    # 求解前缺测检查（四大率值组分 + 被约束有害组分必须实测，一次性报全）
     material_rows = [{
         "code": r.code, "name": r.name, "version": r.version,
         "lab_report_no": r.lab_report_no,
         "composition": r.composition_dry, "measured_oxides": list(r.measured),
     } for r in rows]
-    chemistry.require_measured(material_rows, ["CaO", "SiO2", "Al2O3", "Fe2O3"])
+    required = ["CaO", "SiO2", "Al2O3", "Fe2O3"]
     for key in (req.hazard_limits_pct or {}):
-        chemistry.require_measured(
-            material_rows,
-            ["Na2O", "K2O"] if key == "alkali_eq" else [key],
-        )
+        required += ["Na2O", "K2O"] if key == "alkali_eq" else [key]
+    chemistry.require_measured(material_rows, required)
 
     # 最低掺量算术预检
     mins_sum = sum(r.min_share_pct for r in rows)

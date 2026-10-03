@@ -1,0 +1,182 @@
+<div class="panel">
+  <div class="row">
+    <h2>② 版本化约束规范（率值窗口 + 有害组分限值）</h2>
+    <span class="spacer"></span>
+    <button class="ghost" (click)="showCreate = !showCreate">
+      {{ showCreate ? '收起' : '新建规范草稿' }}</button>
+    <button class="ghost" (click)="reload()">刷新</button>
+  </div>
+  <p class="muted small" style="margin-top:0">
+    规范流转：草稿 → 发布（生成不可编辑的修订版）→ 停用。
+    已发布规范不可直接改参数，只能“复制为新草稿”再发布新修订；
+    试算按修订版冻结参数执行并随批次落库，历史批次永不因规范改版而被重新解释。
+  </p>
+
+  <!-- 新建规范 -->
+  <div class="callout info" *ngIf="showCreate">
+    <div class="row">
+      <label class="small">规范编号 <input class="wide" type="text" [(ngModel)]="newCode"
+        placeholder="如 SPEC-LOW-ALKALI" /></label>
+      <label class="small">名称 <input class="wide" type="text" [(ngModel)]="newName"
+        placeholder="如 低碱生料规范" /></label>
+      <button (click)="createSpec()" [disabled]="busy">创建草稿</button>
+      <span class="small muted">创建后默认带入常规率值窗口与 Cl/碱当量限值，可在草稿中调整。</span>
+    </div>
+  </div>
+
+  <div class="callout err" *ngIf="error">
+    <strong>{{ error.error_code || 'ERROR' }}</strong> — {{ error.message }}
+    <span class="small" *ngIf="error.error_code === 'SPEC_CONFLICT'">
+      （已自动刷新为最新状态，请基于新 lock_version 重试。）</span>
+  </div>
+  <div class="callout info" *ngIf="info">{{ info }}</div>
+
+  <div class="grid2">
+    <!-- 规范列表 -->
+    <div>
+      <table>
+        <thead>
+          <tr><th>编号</th><th>名称</th><th>状态</th><th>修订版</th>
+            <th class="num">lock</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr *ngFor="let s of specs"
+              [style.background]="sel?.id === s.id ? 'var(--brand-soft)' : ''">
+            <td class="mono small">{{ s.code }}</td>
+            <td class="small">{{ s.name }}</td>
+            <td><span [class]="statusCls(s.status)">{{ statusLabel(s.status) }}</span></td>
+            <td class="small mono">
+              {{ s.revisions.length ? 'r' + s.revisions[s.revisions.length-1].revision_no : '—' }}
+            </td>
+            <td class="num small mono">{{ s.lock_version }}</td>
+            <td><button class="ghost" (click)="select(s)">打开</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="small muted" *ngIf="!specs.length">尚无规范，点击“新建规范草稿”。</p>
+    </div>
+
+    <!-- 规范详情 -->
+    <div *ngIf="sel">
+      <div class="panel" style="margin-bottom:10px">
+        <div class="row">
+          <h3 style="margin:0">{{ sel.name }}
+            <span class="mono small muted">{{ sel.code }}</span></h3>
+          <span [class]="statusCls(sel.status)">{{ statusLabel(sel.status) }}</span>
+          <span class="spacer"></span>
+          <span class="small muted mono">lock_version={{ sel.lock_version }}</span>
+        </div>
+        <div class="small muted" *ngIf="sel.note">备注：{{ sel.note }}</div>
+
+        <!-- 草稿编辑 -->
+        <ng-container *ngIf="sel.status === 'draft'">
+          <h3 style="margin-top:10px">草稿参数（可编辑，发布后冻结）</h3>
+          <table>
+            <thead><tr><th>指标</th><th class="num">下限</th><th class="num">上限</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let ind of inds">
+                <td>{{ ind }}</td>
+                <td class="num"><input type="number" step="0.01"
+                  [(ngModel)]="draftT[ind].min" /></td>
+                <td class="num"><input type="number" step="0.01"
+                  [(ngModel)]="draftT[ind].max" /></td>
+              </tr>
+            </tbody>
+          </table>
+          <table style="margin-top:8px">
+            <thead><tr><th>有害组分（干基）</th><th class="num">上限 %</th><th></th></tr></thead>
+            <tbody>
+              <tr *ngFor="let h of hazardRows; let i = index">
+                <td><input type="text" [(ngModel)]="h.key" placeholder="Cl / alkali_eq" /></td>
+                <td class="num"><input type="number" step="0.001" [(ngModel)]="h.limit" /></td>
+                <td><button class="ghost" (click)="removeHazardRow(i)">删</button></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="row" style="margin-top:8px">
+            <button class="ghost" (click)="addHazardRow()">+ 限值行</button>
+            <span class="spacer"></span>
+            <button class="ghost" (click)="saveDraft()" [disabled]="busy">保存草稿</button>
+            <button (click)="publish()" [disabled]="busy || !sel.draft_targets">
+              发布为不可变修订版</button>
+          </div>
+        </ng-container>
+
+        <!-- 已发布 / 已停用 -->
+        <ng-container *ngIf="sel.status !== 'draft'">
+          <div class="row" style="margin-top:8px" *ngIf="sel.status === 'published'">
+            <button class="ghost" (click)="copyToDraft()" [disabled]="busy">
+              复制为新草稿（修改唯一入口）</button>
+            <button class="ghost" (click)="retire()" [disabled]="busy">停用规范</button>
+          </div>
+          <div class="callout warn small" *ngIf="sel.status === 'retired'">
+            已停用：新试算引用将被拒绝（SPEC_RETIRED），历史批次仍可正常回看。
+          </div>
+        </ng-container>
+      </div>
+
+      <!-- 修订版列表 -->
+      <div class="panel" style="margin-bottom:10px" *ngIf="sel.revisions.length">
+        <h3>已发布修订版（不可编辑）</h3>
+        <table>
+          <thead>
+            <tr><th>修订</th><th>率值窗口</th><th>有害组分限值</th><th>发布时间</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let r of sel.revisions"
+                [style.background]="impactedRev === r.revision_no ? 'var(--warn-bg)' : ''">
+              <td class="mono">r{{ r.revision_no }}</td>
+              <td class="small mono">{{ fmtTargets(r.targets) }}</td>
+              <td class="small">{{ fmtHazards(r.hazard_limits_pct) }}</td>
+              <td class="small muted">{{ r.published_at | date:'yyyy-MM-dd HH:mm' }}</td>
+              <td><button class="ghost" (click)="showImpacted(r.revision_no)">
+                影响的批次</button></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- 影响的批次 -->
+        <div class="callout info small" *ngIf="impactedRev != null">
+          修订版 r{{ impactedRev }} 影响的试算批次（{{ impactedRuns.length }}）：
+          <span *ngIf="!impactedRuns.length">暂无试算引用该修订版。</span>
+          <div *ngFor="let r of impactedRuns" class="mono">
+            {{ r.run_code }} · {{ r.scenario_name }} · {{ r.status }} · {{ r.created_at }}
+          </div>
+        </div>
+
+        <!-- 修订版比较 -->
+        <div class="row" style="margin-top:10px" *ngIf="sel.revisions.length >= 1">
+          <strong class="small">比较修订版：</strong>
+          <select [(ngModel)]="cmpFrom">
+            <option *ngFor="let r of sel.revisions" [value]="r.revision_no">
+              r{{ r.revision_no }}</option>
+          </select>
+          <span>→</span>
+          <select [(ngModel)]="cmpTo">
+            <option *ngFor="let r of sel.revisions" [value]="r.revision_no">
+              r{{ r.revision_no }}</option>
+          </select>
+          <button class="ghost" (click)="compare()">比较</button>
+        </div>
+        <table *ngIf="diff" style="margin-top:8px">
+          <thead>
+            <tr><th>字段</th><th class="num">r{{ diff.from_revision }}</th>
+              <th class="num">r{{ diff.to_revision }}</th><th>变化</th></tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let ch of diff.changes">
+              <td class="mono small">{{ ch.field }}</td>
+              <td class="num">{{ ch.from ?? '—' }}</td>
+              <td class="num">{{ ch.to ?? '—' }}</td>
+              <td><span [class]="diffCls(ch.direction)">{{ ch.direction }}</span></td>
+            </tr>
+            <tr *ngIf="!diff.changes.length">
+              <td colspan="4" class="muted small">两个修订版参数完全一致。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="muted small" *ngIf="!sel">点击“打开”查看规范详情、发布修订版或比较版本差异。</div>
+  </div>
+</div>

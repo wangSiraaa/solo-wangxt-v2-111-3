@@ -8,7 +8,7 @@
   <div class="grid2">
     <div>
       <table>
-        <thead><tr><th>批次号</th><th>场景</th><th>状态</th><th>模式</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>批次号</th><th>场景</th><th>状态</th><th>规范</th><th>模式</th><th>时间</th><th></th></tr></thead>
         <tbody>
           <tr *ngFor="let r of runs"
               [style.background]="detail?.id === r.id ? 'var(--brand-soft)' : ''">
@@ -16,6 +16,10 @@
             <td>{{ r.scenario_name }}</td>
             <td><span [class]="'badge ' + (r.status === 'feasible' ? 'ok' : 'err')">
               {{ r.status }}</span></td>
+            <td>
+              <span class="badge ok" *ngIf="r.spec as sp">{{ sp.spec_code }} r{{ sp.revision_no }}</span>
+              <span class="badge warn" *ngIf="!r.spec">临时参数</span>
+            </td>
             <td class="small">{{ r.modes.join('/') }}</td>
             <td class="small muted">{{ r.created_at }}</td>
             <td><button class="ghost" (click)="open(r.id)">回看</button></td>
@@ -34,6 +38,30 @@
           目标 SM[{{ detail.target.SM.min }},{{ detail.target.SM.max }}]
           IM[{{ detail.target.IM.min }},{{ detail.target.IM.max }}]
           KH[{{ detail.target.KH.min }},{{ detail.target.KH.max }}]
+        </div>
+
+        <!-- 规范绑定：冻结快照随批次落库，规范日后改版/停用不改变本批次解释 -->
+        <div class="callout info small" *ngIf="detail.spec_snapshot as snap">
+          <div class="row">
+            <strong>约束规范：</strong>
+            <span class="mono">{{ snap.spec_code }}</span> {{ snap.spec_name }}
+            <span class="badge ok">修订版 r{{ snap.revision_no }}</span>
+            <span class="muted">发布于 {{ snap.published_at }}</span>
+            <span class="spacer"></span>
+            <button class="ghost" (click)="backToSpec()">查看当时冻结规则</button>
+          </div>
+          <div class="small" style="margin-top:4px">
+            冻结参数（随批次落库）：
+            SM[{{ snap.targets.SM.min }},{{ snap.targets.SM.max }}]
+            IM[{{ snap.targets.IM.min }},{{ snap.targets.IM.max }}]
+            KH[{{ snap.targets.KH.min }},{{ snap.targets.KH.max }}]
+            <span *ngFor="let h of hazardEntries(snap.hazard_limits_pct)">
+              · {{ h[0] }}≤{{ h[1] }}%</span>
+          </div>
+        </div>
+        <div class="callout warn small" *ngIf="!detail.spec_snapshot">
+          本批次为规范体系建立前的历史记录（或临时参数试算），未关联规范；
+          所示率值窗口/限值为当时手工输入的临时参数，按原样回看。
         </div>
       </div>
 

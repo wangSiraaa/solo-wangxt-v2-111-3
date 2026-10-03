@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from .database import Base, SessionLocal, engine
-from .models import AssayVersion, Material
+from .models import AssayVersion, ConstraintSpec, Material
 
 ALL_MAJOR = ["CaO", "SiO2", "Al2O3", "Fe2O3",
              "MgO", "SO3", "K2O", "Na2O", "Cl", "LOI"]
@@ -119,22 +119,42 @@ MATERIALS = [
 ]
 
 
+# 演示用规范草案（虚构）：发布后生成不可变修订版，供试算引用。
+SPECS = [
+    dict(
+        code="SPEC-LOW-ALKALI", name="低碱生料规范（虚构演示）", status="draft",
+        draft_targets={"SM": {"min": 2.4, "max": 2.8},
+                       "IM": {"min": 1.4, "max": 1.8},
+                       "KH": {"min": 0.88, "max": 0.94}},
+        draft_hazard_limits_pct={"Cl": 0.03, "alkali_eq": 0.60},
+        note="低碱路线草案：碱当量收紧至 0.60%（干基），Cl≤0.03%。",
+    ),
+]
+
+
 def seed():
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        if db.scalars(select(Material)).first():
-            print("seed: 数据已存在，跳过。")
-            return
-        for spec in MATERIALS:
-            versions = spec.pop("versions")
-            mat = Material(**spec)
-            db.add(mat)
-            db.flush()
-            for v in versions:
-                db.add(AssayVersion(material_id=mat.id, **v))
-        db.commit()
-        print(f"seed: 已写入 {len(MATERIALS)} 个虚构原料及其化验版本。")
+        if not db.scalars(select(Material)).first():
+            for spec in MATERIALS:
+                versions = spec.pop("versions")
+                mat = Material(**spec)
+                db.add(mat)
+                db.flush()
+                for v in versions:
+                    db.add(AssayVersion(material_id=mat.id, **v))
+            db.commit()
+            print(f"seed: 已写入 {len(MATERIALS)} 个虚构原料及其化验版本。")
+        else:
+            print("seed: 原料数据已存在，跳过。")
+        if not db.scalars(select(ConstraintSpec)).first():
+            for spec in SPECS:
+                db.add(ConstraintSpec(**spec))
+            db.commit()
+            print(f"seed: 已写入 {len(SPECS)} 个虚构规范草案。")
+        else:
+            print("seed: 规范数据已存在，跳过。")
     finally:
         db.close()
 

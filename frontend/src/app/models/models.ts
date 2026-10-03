@@ -34,6 +34,7 @@ export interface BlendRequest {
   modes: string[];
   cheap_material_id?: number | null;
   save?: boolean;
+  spec_revision_id?: number | null;
 }
 
 export interface ConversionStep {
@@ -101,16 +102,73 @@ export interface BlendResponse {
   run_code: string;
   status: string;
   solutions: Solution[];
+  spec?: SpecBinding | null;
+}
+
+export interface SpecBinding {
+  spec_id: number;
+  spec_code: string;
+  spec_name: string;
+  revision_id: number;
+  revision_no: number;
+  targets: Targets;
+  hazard_limits_pct: Record<string, number>;
+}
+
+export interface SpecRevision {
+  id: number;
+  revision_no: number;
+  targets: Targets;
+  hazard_limits_pct: Record<string, number>;
+  published_at: string;
+  note?: string | null;
+}
+
+export type SpecStatus = 'draft' | 'published' | 'retired';
+
+export interface ConstraintSpec {
+  id: number;
+  code: string;
+  name: string;
+  status: SpecStatus;
+  lock_version: number;
+  draft_targets?: Targets | null;
+  draft_hazard_limits_pct?: Record<string, number> | null;
+  note?: string | null;
+  created_at: string;
+  revisions: SpecRevision[];
+}
+
+export interface SpecDiffChange {
+  field: string;
+  from: number | null;
+  to: number | null;
+  direction: '新增' | '删除' | '收紧' | '放宽';
+}
+
+export interface SpecDiff {
+  spec_id: number;
+  spec_code: string;
+  spec_name: string;
+  from_revision: number;
+  to_revision: number;
+  changes: SpecDiffChange[];
+}
+
+export interface SpecSnapshot extends SpecBinding {
+  published_at: string;
 }
 
 export interface RunSummary {
   id: number; run_code: string; scenario_name: string;
   status: string; created_at: string; modes: string[];
+  spec?: { spec_id: number; spec_code: string; revision_no: number } | null;
 }
 
 export interface RunDetail {
   id: number; run_code: string; scenario_name: string;
   batch_t_dry: number; target: Targets; constraint_set: any;
   status: string; created_at: string;
+  spec_snapshot?: SpecSnapshot | null;
   solutions: any[];
 }

@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from . import chemistry, crud, optimizer
@@ -21,9 +22,25 @@ from .schemas import (
     MaterialOut,
     SolutionItem,
     SolutionOut,
+    SpecAction,
+    SpecCreate,
+    SpecDraftUpdate,
+    SpecOut,
+    SpecRevisionOut,
+    Targets,
 )
 
 Base.metadata.create_all(bind=engine)
+
+# 轻量迁移：老库 blend_run 表补规范绑定列（新库 create_all 已含，幂等）。
+with engine.begin() as _conn:
+    _conn.execute(text(
+        "ALTER TABLE blend_run ADD COLUMN IF NOT EXISTS "
+        "spec_revision_id INTEGER REFERENCES spec_revision(id)"
+    ))
+    _conn.execute(text(
+        "ALTER TABLE blend_run ADD COLUMN IF NOT EXISTS spec_snapshot JSON"
+    ))
 
 app = FastAPI(
     title="离线原料配比试算（虚构工艺边界 · 研发用）",
@@ -40,7 +57,7 @@ def blend_error_handler(request, exc: chemistry.BlendError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(
-        status_code=422,
+        status_code=getattr(exc, "status_code", 422),
         content={
             "error_code": exc.code,
             "message": exc.message,
@@ -78,6 +95,28 @@ def _serialize_solution(sol: dict) -> SolutionOut:
 
 @app.post("/api/blend", response_model=BlendResponse)
 def blend(req: BlendRequest, db: Session = Depends(get_db)):
+    spec_binding = None
+    spec_info = None
+    if req.spec_revision_id is not None:
+        # 引用规范：以修订版冻结参数为准，请求里的临时率值/限值不生效，
+        # 防止把一串临时参数误当成可复现的规范。
+        rev, spec = crud.get_revision_with_spec(db, req.spec_revision_id)
+        if spec.status == "retired":
+            raise chemistry.SpecError(
+                "SPEC_RETIRED",
+                f"规范 {spec.code} 已停用，禁止新的试算引用；历史批次仍可回看。",
+                {"spec_id": spec.id, "code": spec.code},
+            )
+        req = req.model_copy(update={
+            "targets": Targets(**rev.targets),
+            "hazard_limits_pct": dict(rev.hazard_limits_pct),
+        })
+        spec_binding = (spec, rev)
+        spec_info = {
+            "spec_id": spec.id, "spec_code": spec.code, "spec_name": spec.name,
+            "revision_id": rev.id, "revision_no": rev.revision_no,
+            "targets": rev.targets, "hazard_limits_pct": rev.hazard_limits_pct,
+        }
     pairs = crud.resolve_candidates(db, req.candidates)
     rows = optimizer.prepare_rows(pairs)
     if not rows:
@@ -85,13 +124,14 @@ def blend(req: BlendRequest, db: Session = Depends(get_db)):
     solutions = optimizer.solve(rows, req)
     run_id, run_code = None, ""
     if req.save:
-        run = crud.save_run(db, req, solutions)
+        run = crud.save_run(db, req, solutions, spec_binding=spec_binding)
         run_id, run_code = run.id, run.run_code
     return BlendResponse(
         run_id=run_id,
         run_code=run_code,
         status="feasible" if any(s["success"] for s in solutions) else "infeasible",
         solutions=[_serialize_solution(s) for s in solutions],
+        spec=spec_info,
     )
 
 
@@ -167,6 +207,74 @@ def run_detail(run_id: int, db: Session = Depends(get_db)):
     if detail is None:
         raise HTTPException(404, "试算记录不存在。")
     return detail
+
+
+# ---- 版本化约束规范：草稿 → 发布（不可变修订版）→ 停用 ----
+
+@app.get("/api/specs", response_model=list[SpecOut])
+def specs(db: Session = Depends(get_db)):
+    return crud.list_specs(db)
+
+
+@app.post("/api/specs", response_model=SpecOut, status_code=201)
+def spec_create(req: SpecCreate, db: Session = Depends(get_db)):
+    return crud.create_spec(db, req)
+
+
+@app.get("/api/specs/{spec_id}", response_model=SpecOut)
+def spec_detail(spec_id: int, db: Session = Depends(get_db)):
+    return crud._get_spec(db, spec_id)
+
+
+@app.put("/api/specs/{spec_id}/draft", response_model=SpecOut)
+def spec_draft_update(spec_id: int, req: SpecDraftUpdate, db: Session = Depends(get_db)):
+    """编辑草稿参数；已发布规范返回 409 SPEC_IMMUTABLE，只能复制出新草稿。"""
+    return crud.update_spec_draft(db, spec_id, req)
+
+
+@app.post("/api/specs/{spec_id}/publish", response_model=SpecRevisionOut, status_code=201)
+def spec_publish(spec_id: int, req: SpecAction, db: Session = Depends(get_db)):
+    """发布草稿 → 生成不可编辑的修订版；并发发布仅一个成功，其余 409。"""
+    return crud.publish_spec(db, spec_id, req)
+
+
+@app.post("/api/specs/{spec_id}/copy", response_model=SpecOut)
+def spec_copy(spec_id: int, req: SpecAction, db: Session = Depends(get_db)):
+    """把最新已发布修订版复制为新草稿（修改已发布规范的唯一入口）。"""
+    return crud.copy_spec_to_draft(db, spec_id, req)
+
+
+@app.post("/api/specs/{spec_id}/retire", response_model=SpecOut)
+def spec_retire(spec_id: int, req: SpecAction, db: Session = Depends(get_db)):
+    """停用规范：禁止新试算引用，历史批次仍可回看。"""
+    return crud.retire_spec(db, spec_id, req)
+
+
+@app.get("/api/specs/{spec_id}/diff")
+def spec_diff(spec_id: int, from_no: int, to_no: int,
+              db: Session = Depends(get_db)):
+    """两个修订版的参数差异（from_no/to_no 为修订号）。"""
+    return crud.diff_revisions(db, spec_id, from_no, to_no)
+
+
+@app.get("/api/specs/{spec_id}/revisions/{revision_no}/runs")
+def spec_revision_runs(spec_id: int, revision_no: int,
+                       db: Session = Depends(get_db)):
+    """列出引用该修订版的全部试算批次。"""
+    rev, runs = crud.runs_of_revision(db, spec_id, revision_no)
+    return {
+        "spec_id": spec_id,
+        "revision_no": revision_no,
+        "revision": {
+            "id": rev.id,
+            "revision_no": rev.revision_no,
+            "targets": rev.targets,
+            "hazard_limits_pct": rev.hazard_limits_pct,
+            "published_at": rev.published_at.isoformat(timespec="seconds"),
+            "note": rev.note,
+        },
+        "runs": runs,
+    }
 
 
 # ---- 生产构建后的静态前端（ng build 产物） ----

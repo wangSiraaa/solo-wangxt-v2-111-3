@@ -65,8 +65,61 @@ class AssayVersion(Base):
     material: Mapped["Material"] = relationship(back_populates="assay_versions")
 
 
+class ConstraintSpec(Base):
+    """版本化约束规范（率值窗口 + 有害组分限值）。
+
+    生命周期：draft → published → retired。
+    - draft：draft_targets / draft_hazard_limits_pct 可编辑（乐观锁 lock_version）；
+    - publish：把草稿冻结为一条不可变的 SpecRevision，规范回到 published；
+    - 已发布规范不可直接改参数，只能 copy 回草稿（复制最新修订版）再发布新修订；
+    - retired：禁止新试算引用，历史记录仍可回看。
+    """
+
+    __tablename__ = "constraint_spec"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True)  # 规范编号
+    name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft/published/retired
+    draft_targets: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    draft_hazard_limits_pct: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    lock_version: Mapped[int] = mapped_column(Integer, default=1)  # 乐观并发令牌
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    revisions: Mapped[list["SpecRevision"]] = relationship(
+        back_populates="spec", cascade="all, delete-orphan",
+        order_by="SpecRevision.revision_no",
+    )
+
+
+class SpecRevision(Base):
+    """规范的已发布修订版：发布后不可编辑，试算按此冻结参数执行。"""
+
+    __tablename__ = "spec_revision"
+    __table_args__ = (UniqueConstraint("spec_id", "revision_no", name="uq_spec_revision"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    spec_id: Mapped[int] = mapped_column(ForeignKey("constraint_spec.id"))
+    revision_no: Mapped[int] = mapped_column(Integer)
+    targets: Mapped[dict] = mapped_column(JSON)  # {"SM": {"min":..,"max":..}, "IM":.., "KH":..}
+    hazard_limits_pct: Mapped[dict] = mapped_column(JSON)  # 干基 %，如 {"Cl": 0.03}
+    published_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    spec: Mapped["ConstraintSpec"] = relationship(back_populates="revisions")
+
+
 class BlendRun(Base):
-    """一次试算（可含多个方案：成本最优/廉价料最多/平衡方案）。"""
+    """一次试算（可含多个方案：成本最优/廉价料最多/平衡方案）。
+
+    引用规范试算时，spec_revision_id + spec_snapshot 把规范编号、修订号与
+    完整冻结参数随结果一起落库；此后规范再改版/停用都不影响本批次的解释。
+    规范出现前的历史批次 spec_revision_id 为 NULL，按“临时参数”原样回看。
+    """
 
     __tablename__ = "blend_run"
 
@@ -77,6 +130,10 @@ class BlendRun(Base):
     target: Mapped[dict] = mapped_column(JSON)
     constraint_set: Mapped[dict] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(16))  # feasible / infeasible / error
+    spec_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("spec_revision.id"), nullable=True
+    )
+    spec_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
 

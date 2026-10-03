@@ -8,10 +8,10 @@
 
 | 层 | 技术 | 职责 |
 |---|---|---|
-| 前端 | Angular 18（standalone 组件，纯 CSS 堆叠条） | 氧化物来源/配比比例展示、试算交互、方案对比、化验追溯 |
-| 后端 | FastAPI + Pydantic | REST API、干湿基换算、错误码、静态托管 |
+| 前端 | Angular 18（standalone 组件，纯 CSS 堆叠条） | 氧化物来源/配比比例展示、规范版本管理、试算交互、方案对比、化验追溯 |
+| 后端 | FastAPI + Pydantic | REST API、干湿基换算、规范生命周期与乐观并发、错误码、静态托管 |
 | 优化 | SciPy `linprog`（HiGHS） | 线性规划：成本最优 / 廉价料最大 / 率值居中 |
-| 存储 | PostgreSQL 15 | 原料、**多版化验单**、试算批次、方案、逐原料换算留痕 |
+| 存储 | PostgreSQL 15 | 原料、**多版化验单**、**版本化约束规范**、试算批次、方案、逐原料换算留痕 |
 
 ## 计算口径
 
@@ -39,6 +39,27 @@
 - **有害组分干基上限**（Cl、碱当量等，可扩展）；
 - 率值区间经线性化进入 LP（如 SM≤hi ⇔ `Σ(SiO2−hi(Al2O3+Fe2O3))x ≤ 0`）。
 
+### 版本化约束规范（constraint_spec / spec_revision）
+
+研发规范收紧时，不能让一串临时参数被误当成可复现的规范，因此率值窗口与
+有害组分限值按**规范 → 不可变修订版**管理：
+
+- **生命周期**：`draft → published → retired`。草稿可编辑（携带 `lock_version`
+  乐观并发令牌）；发布把草稿冻结为**不可编辑的修订版**（`spec_revision`）；
+  修改已发布规范只能“复制为新草稿”再发布下一修订；停用后禁止新试算引用，
+  历史批次仍可回看。
+- **乐观并发**：发布/复制/停用/草稿保存均为 `WHERE id AND lock_version AND status`
+  的 CAS 更新——两个窗口基于同一草稿并发发布时**只产生一个有效修订**，
+  另一方收到 409 `SPEC_CONFLICT`（响应带最新状态，可刷新重试）；
+  直接编辑已发布规范返回 409 `SPEC_IMMUTABLE`；试算落库前对规范行加锁复核，
+  与“停用”竞争时整批拒绝（409 `SPEC_RETIRED`）。
+- **试算绑定**：`POST /api/blend` 传 `spec_revision_id` 时，服务端**以修订版冻结
+  参数为准**（请求里的临时 targets/限值不生效），并把规范编号、修订号、完整参数
+  快照与求解结果一起写入 `blend_run.spec_snapshot`——规范日后改版/停用都不会
+  重新解释历史批次；规范体系建立前的历史批次（`spec_snapshot=NULL`）按
+  “临时参数”原样回看。
+- 规范要求的有害组分缺测时，仍返回 422 `MISSING_ASSAY`，不会把方案标为可行。
+
 ### 求解模式与无解诊断
 
 - `min_cost`：最小元/吨干生料；
@@ -55,15 +76,16 @@ backend/
     main.py        FastAPI 路由 + 错误处理 + SPA 托管
     chemistry.py   干湿基换算 / 质量守恒 / SM/IM/KH / 缺测与零分母异常
     optimizer.py   SciPy HiGHS LP、多模式、冲突诊断
-    models.py      SQLAlchemy：material / assay_version / blend_run / solution / item
-    crud.py        持久化与历史回看
+    models.py      SQLAlchemy：material / assay_version / constraint_spec /
+                   spec_revision / blend_run / solution / item
+    crud.py        持久化、规范生命周期（CAS 乐观并发）与历史回看
     schemas.py     Pydantic 模型
-    seed.py        虚构演示数据（含湿基化验单、缺测/零分母演示料）
-  tests/           21 个 pytest（换算/守恒/报错/求解/API/追溯）
+    seed.py        虚构演示数据（含湿基化验单、缺测/零分母演示料、低碱规范草案）
+  tests/           27 个 pytest（换算/守恒/报错/求解/规范并发与冻结/API/追溯）
   scripts/         pg_start / pg_stop / seed / serve
 frontend/
   src/app/
-    components/    materials / blend / solution-card / history / stack-bar
+    components/    materials / specs / blend / solution-card / history / stack-bar
     services/api.service.ts
     models/models.ts
 ```
@@ -96,30 +118,46 @@ Python 依赖：`pip install -r backend/requirements.txt`（本机装于用户 s
 ## 前端四个标签页
 
 1. **原料与化验**：全部原料/多版化验单、干湿基标记、缺测红格、干基换算预览；
-2. **配比试算与方案对比**：候选/化验版/率值窗口/有害上限/模式选择，四个快速场景：
+2. **约束规范**：规范列表与状态流转（草稿→发布→停用）、草稿编辑（率值窗口 +
+   有害组分限值行）、发布不可变修订版、复制已发布规范为新草稿、修订版两两比较
+   （新增/删除/收紧/放宽）、查看某修订版影响的试算批次；409 冲突自动刷新提示；
+3. **配比试算与方案对比**：约束来源可选“临时参数”或任一已发布规范修订版
+   （选中后窗口/限值锁定为冻结值），候选/化验版/模式选择，四个快速场景：
    - 基准三方案对比（含水率差异：粉煤灰 18% 湿基化验单 → 采购湿料量与留痕）；
    - 廉价原料（页岩）致 IM/KH 超限 → 失败 + 冲突项；
    - 碱当量上限收紧（0.40%）→ 有害组分冲突与突破量；
    - 5000 t 大批量 → 湿基可用量与 KH 同时冲突；
-3. **手工配比**：一键装入“100% 零铁石英（IM 分母为零）”和“缺测矿样（MISSING_ASSAY）”；
-4. **历史追溯**：每个方案可追到批次号、原始化验版本/单号、原始 wet/dry 报送值、
-   逐组分湿→干公式、干/湿料质量、水量与成本算式。
+   另附**手工配比**：一键装入“100% 零铁石英（IM 分母为零）”和
+   “缺测矿样（MISSING_ASSAY）”；
+4. **历史追溯**：批次列表标注绑定的规范修订（或“临时参数”）；每个方案可追到
+   批次号、原始化验版本/单号、原始 wet/dry 报送值、逐组分湿→干公式、干/湿料
+   质量、水量与成本算式；绑定规范的批次展示冻结参数快照，并可一键跳回
+   “当时冻结规则”的规范修订页。
 
 ## API 摘要
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/materials?active_only=` | 原料与全部化验版本 |
-| POST | `/api/blend` | 试算（多模式、约束、可入库） |
+| POST | `/api/blend` | 试算（多模式、约束、可入库；`spec_revision_id` 按规范冻结参数求解） |
 | POST | `/api/evaluate` | 手工份额合成 + 率值（错误演示） |
-| GET | `/api/runs` `/api/runs/{id}` | 历史批次与完整追溯 |
+| GET | `/api/runs` `/api/runs/{id}` | 历史批次（含规范绑定）与完整追溯 |
+| GET/POST | `/api/specs` | 规范列表 / 新建草稿 |
+| GET | `/api/specs/{id}` | 规范详情（草稿参数 + 全部修订版 + lock_version） |
+| PUT | `/api/specs/{id}/draft` | 编辑草稿（已发布 → 409 `SPEC_IMMUTABLE`） |
+| POST | `/api/specs/{id}/publish` | 发布草稿为不可变修订版（并发仅一个成功，其余 409 `SPEC_CONFLICT`） |
+| POST | `/api/specs/{id}/copy` | 复制最新修订版为新草稿（修改已发布规范的唯一入口） |
+| POST | `/api/specs/{id}/retire` | 停用（新试算引用 → 409 `SPEC_RETIRED`，历史可回看） |
+| GET | `/api/specs/{id}/diff?from_no=&to_no=` | 两个修订版的参数差异（新增/删除/收紧/放宽） |
+| GET | `/api/specs/{id}/revisions/{no}/runs` | 该修订版影响的全部试算批次 |
 | GET | `/api/health` | 健康检查（含 fictional-boundary 标记） |
 
-错误响应体：`{ "error_code": "MISSING_ASSAY|ZERO_DENOMINATOR|...", "message": ..., "details": ... }`。
+错误响应体：`{ "error_code": "MISSING_ASSAY|ZERO_DENOMINATOR|SPEC_CONFLICT|SPEC_IMMUTABLE|SPEC_RETIRED|...", "message": ..., "details": ... }`
+（业务 422；规范状态/并发冲突 409）。
 
 ## 测试
 
 ```bash
 cd backend && python3 -m pytest tests/ -q
-# 21 passed
+# 27 passed
 ```

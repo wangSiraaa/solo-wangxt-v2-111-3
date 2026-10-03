@@ -13,13 +13,21 @@ EPS = 1e-9
 
 
 class BlendError(Exception):
-    """带错误码的业务异常，API 层映射为 422。"""
+    """带错误码的业务异常，API 层按 status_code 映射（默认 422）。"""
+
+    status_code = 422
 
     def __init__(self, code: str, message: str, details: dict | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+class SpecError(BlendError):
+    """规范生命周期/并发冲突：409。"""
+
+    status_code = 409
 
 
 class MissingAssayError(BlendError):

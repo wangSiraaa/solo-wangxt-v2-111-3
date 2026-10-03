@@ -5,7 +5,7 @@ import {
   ApiService,
 } from '../services/api.service';
 import {
-  BlendResponse, Material, Solution, Targets,
+  BlendResponse, ConstraintSpec, Material, Solution, Targets,
 } from '../models/models';
 import { SolutionCardComponent } from './solution-card.component';
 
@@ -26,6 +26,14 @@ interface Preset {
   cheap_id?: number;
   batch?: number;
   demo?: boolean;
+}
+
+/** 已发布规范修订版的下拉选项。 */
+interface SpecOption {
+  revision_id: number;
+  label: string;
+  targets: Targets;
+  hazards: Record<string, number>;
 }
 
 const BASE_T: Targets = { SM: { min: 2.4, max: 2.8 }, IM: { min: 1.4, max: 1.8 }, KH: { min: 0.88, max: 0.94 } };
@@ -49,6 +57,10 @@ export class BlendComponent implements OnInit {
   loading = false;
   result: BlendResponse | null = null;
   apiError: any = null;
+
+  // 约束来源：null = 临时参数；否则为已发布规范修订版 id
+  specOptions: SpecOption[] = [];
+  selectedRevisionId: number | null = null;
 
   // 手工配比（错误演示）
   evalIds = [8];
@@ -101,6 +113,50 @@ export class BlendComponent implements OnInit {
         };
       }
     });
+    this.reloadSpecs();
+  }
+
+  reloadSpecs(): void {
+    this.api.specs().subscribe(ss => {
+      this.specOptions = [];
+      for (const s of ss) {
+        if (s.status === 'retired') continue;  // 停用规范禁止新试算引用
+        for (const r of s.revisions) {
+          this.specOptions.push({
+            revision_id: r.id,
+            label: `${s.code} ${s.name} · r${r.revision_no}`,
+            targets: r.targets,
+            hazards: r.hazard_limits_pct,
+          });
+        }
+      }
+      // 已选修订版若不再可引用（如规范被停用），回退到临时参数
+      if (this.selectedRevisionId != null
+          && !this.specOptions.some(o => o.revision_id === this.selectedRevisionId)) {
+        this.selectedRevisionId = null;
+      }
+      this.applySpecParams();
+    });
+  }
+
+  get usingSpec(): boolean { return this.selectedRevisionId != null; }
+
+  selectedSpecOption(): SpecOption | undefined {
+    return this.specOptions.find(o => o.revision_id === this.selectedRevisionId);
+  }
+
+  /** 选中规范后，率值窗口/有害限值切换为冻结值且只读。 */
+  onSpecChange(): void {
+    this.applySpecParams();
+    this.result = null;
+  }
+
+  private applySpecParams(): void {
+    const opt = this.selectedSpecOption();
+    if (!opt) return;
+    this.targets = JSON.parse(JSON.stringify(opt.targets));
+    this.hazardCl = opt.hazards['Cl'] ?? this.hazardCl;
+    this.hazardAlkali = opt.hazards['alkali_eq'] ?? this.hazardAlkali;
   }
 
   mat(id: number): Material | undefined { return this.materials.find(m => m.id === id); }
@@ -109,6 +165,7 @@ export class BlendComponent implements OnInit {
 
   applyPreset(p: Preset): void {
     this.scenario = p.label;
+    this.selectedRevisionId = null;  // 快速场景使用临时参数
     for (const m of this.materials) {
       this.cand[m.id].selected = p.ids.includes(m.id);
     }
@@ -152,11 +209,16 @@ export class BlendComponent implements OnInit {
       modes: this.selectedModes(),
       cheap_material_id: this.modes.max_cheap ? this.cheapId : null,
       save: true,
+      spec_revision_id: this.selectedRevisionId,
     }).subscribe({
       next: r => { this.result = r; this.loading = false; },
       error: e => {
         this.apiError = e.error ?? { message: '请求失败：' + e.message };
         this.loading = false;
+        // 规范被并发停用/改版时刷新可选项，便于用户处理后重试
+        if (['SPEC_RETIRED', 'SPEC_CONFLICT'].includes(this.apiError?.error_code)) {
+          this.reloadSpecs();
+        }
       },
     });
   }
